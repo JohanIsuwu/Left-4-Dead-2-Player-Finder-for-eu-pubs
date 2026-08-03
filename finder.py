@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # author: murayefeskamus
+# improved by rowan
 
 import a2s
 import threading
@@ -7,6 +8,8 @@ import time
 import os
 import sys
 import json
+import urllib.request
+import re
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -34,7 +37,6 @@ MG  = "\033[95m"
 def clear():
     os.system("cls" if os.name == "nt" else "clear")
 
-
 def copy_to_clipboard(text):
     try:
         import subprocess
@@ -57,7 +59,6 @@ def copy_to_clipboard(text):
         except Exception:
             return False
 
-
 def load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -72,7 +73,7 @@ def save_json(path, data):
 def add_history(entry):
     history = load_json(HISTORY_FILE, [])
     history.insert(0, entry)
-    history = history[:500]  # max 500 kayıt
+    history = history[:500]
     save_json(HISTORY_FILE, history)
 
 def load_favorites():
@@ -80,7 +81,6 @@ def load_favorites():
 
 def save_favorites(favs):
     save_json(FAVORITES_FILE, favs)
-
 
 def load_servers(path):
     servers = []
@@ -97,10 +97,22 @@ def load_servers(path):
         sys.exit(1)
     return servers
 
+def resolve_steam_id(query):
+    if query.isdigit() and len(query) == 17:
+        url = f"https://steamcommunity.com/profiles/{query}?xml=1"
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                html = response.read().decode('utf-8')
+                match = re.search(r'<steamID><!\[CDATA\[(.*?)\]\]></steamID>', html)
+                if match:
+                    return match.group(1)
+        except Exception:
+            pass
+    return query
 
-def query_server(addr, search):
+def query_server(addr, search, exact_match=False):
     search_lower = search.lower()
-
     info = None
     for _ in range(RETRY):
         try:
@@ -122,7 +134,6 @@ def query_server(addr, search):
             if players is not None:
                 break
         except Exception:
-            # Her retry'da biraz daha bekle
             time.sleep(0.2 * (attempt + 1))
 
     if players is None:
@@ -142,7 +153,16 @@ def query_server(addr, search):
         name = p.name.strip()
         if not name:
             continue
-        if search_lower in name.lower():
+        
+        is_match = False
+        if exact_match:
+            if search_lower == name.lower():
+                is_match = True
+        else:
+            if search_lower in name.lower():
+                is_match = True
+
+        if is_match:
             return {
                 "ip"         : addr[0],
                 "port"       : addr[1],
@@ -160,7 +180,6 @@ def query_server(addr, search):
     return None
 
 def query_server_info_only(addr):
-    """İki aşamalı tarama için sadece INFO döner."""
     for _ in range(RETRY):
         try:
             info = a2s.info(addr, timeout=TIMEOUT)
@@ -170,7 +189,6 @@ def query_server_info_only(addr):
         except Exception:
             pass
     return None
-
 
 def format_time(seconds):
     m, s = divmod(seconds, 60)
@@ -188,39 +206,36 @@ def player_bar(count, max_p):
     else:
         col = G
     filled = int(pct * 10)
-    bar = "■" * filled + "□" * (10 - filled)
+    bar = "#" * filled + "-" * (10 - filled)
     return f"{col}{bar}{RST} {count}/{max_p}"
 
 def print_header():
     print(f"""
   {C}{B}L4D2  PLAYER  FINDER{RST}
   {DIM}author: murayefeskamus{RST}
+  {DIM}improved by: rowan{RST}
 """)
 
 def print_help():
     print(f"""
   {B}Commands:{RST}
-    {C}<name>{RST}          Search for a player by name (partial match)
-    {C}multi{RST}           Search for multiple players at once
-    {C}favs{RST}            List saved favorite players
-    {C}addfav <name>{RST}   Add a player to favorites
-    {C}delfav <name>{RST}   Remove a player from favorites
-    {C}scanfavs{RST}        Scan all favorites at once
-    {C}track <name>{RST}    Track a player (auto-scan every 60s)
-    {C}history{RST}         Show recent search history
-    {C}help{RST}            Show this help
-    {C}exit{RST}            Quit
+    {C}<name/ID64>{RST}   Search for a player by name or SteamID64 (permissive)
+    {C}exact <name>{RST}  Search for an exact player name (perfect match)
+    {C}multi{RST}         Search for multiple players at once
+    {C}favs{RST}          List saved favorite players
+    {C}addfav <str>{RST}  Add a player/SteamID to favs (use | for an alias: id | name)
+    {C}delfav <str>{RST}  Remove a player from favorites
+    {C}scanfavs{RST}      Scan all favorites at once
+    {C}track <str>{RST}   Track a player (use 'track exact <name>' for perfect match)
+    {C}history{RST}       Show recent search history
+    {C}help{RST}          Show this help
+    {C}exit{RST}          Quit
 """)
 
-
-def run_search(query, servers, silent=False):
-    """
-    İki aşamalı tarama:
-    1. Tüm sunuculara INFO at, dolu olanları bul
-    2. Sadece dolu sunuculara PLAYER at
-    """
+def run_search(query, servers, silent=False, exact_match=False):
     if not silent:
-        print(f"\n{Y}[*] Searching: {B}{query}{RST}{Y}  ({len(servers)} servers){RST}")
+        mode_str = "EXACT" if exact_match else "PERMISSIVE"
+        print(f"\n{Y}[*] Searching ({mode_str}): {B}{query}{RST}{Y}  ({len(servers)} servers){RST}")
         print(f"    {DIM}Phase 1: scanning for active servers...{RST}")
 
     # Faz 1 — INFO
@@ -276,7 +291,7 @@ def run_search(query, servers, silent=False):
     pt2.start()
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(query_server, addr, query): addr for addr in active}
+        futures = {ex.submit(query_server, addr, query, exact_match): addr for addr in active}
         for fut in as_completed(futures):
             result = fut.result()
             with lock:
@@ -302,7 +317,8 @@ def print_results(found, query, save=True):
     print(f"{G}{B}[+] {len(found)} match(es) found:{RST}\n")
 
     for i, r in enumerate(found, 1):
-        connect = f"connect {r['ip']}:{r['port']}"
+        ip_only = f"{r['ip']}:{r['port']}"
+        connect = f"connect {ip_only}"
         others  = [n for n in r["all"] if n.lower() != r["matched"].lower()]
         print(f"  {C}{B}#{i}  {W}{B}{r['matched']}{RST}")
         print(f"      {DIM}Server  :{RST} {r['server']}")
@@ -313,13 +329,30 @@ def print_results(found, query, save=True):
             print(f"      {DIM}In lobby:{RST} {', '.join(others)}")
         print()
 
-        # Panoya kopyala (ilk sonuç)
-        if i == 1:
-            if copy_to_clipboard(connect):
-                print(f"      {DIM}✓ connect string copied to clipboard{RST}\n")
+    if len(found) == 1:
+        ip_only = f"{found[0]['ip']}:{found[0]['port']}"
+        copy_choice = input(f"  {C}Do you want to copy the IP ({ip_only}) to the clipboard? (y/n) : {RST}").strip().lower()
+        if copy_choice in ["y", "yes", "o", "oui"]:
+            if copy_to_clipboard(ip_only):
+                print(f"  {DIM}[OK] IP copied to clipboard{RST}\n")
+        else:
+            print()
+    else:
+        copy_choice = input(f"  {C}Multiple players found. Enter the number (1-{len(found)}) to copy the IP, or 'n' to skip : {RST}").strip().lower()
+        if copy_choice.isdigit():
+            idx = int(copy_choice)
+            if 1 <= idx <= len(found):
+                ip_only = f"{found[idx-1]['ip']}:{found[idx-1]['port']}"
+                if copy_to_clipboard(ip_only):
+                    print(f"  {DIM}[OK] IP {ip_only} copied to clipboard{RST}\n")
+            else:
+                print(f"  {R}[!] Invalid number.{RST}\n")
+        else:
+            print()
 
-        # History kaydet
-        if save:
+    # History kaydet
+    if save:
+        for r in found:
             add_history({
                 "query"   : query,
                 "matched" : r["matched"],
@@ -329,24 +362,31 @@ def print_results(found, query, save=True):
                 "found_at": r["found_at"],
             })
 
-
 def cmd_multi(servers):
-    print(f"\n  {DIM}Enter player names separated by commas:{RST}")
-    raw = input(f"  {C}Names > {RST}").strip()
+    print(f"\n  {DIM}Enter player names or IDs separated by commas:{RST}")
+    raw = input(f"  {C}Names/IDs > {RST}").strip()
     if not raw:
         return
     names = [n.strip() for n in raw.split(",") if n.strip()]
-    for name in names:
+    for raw_name in names:
+        name = resolve_steam_id(raw_name)
+        if name != raw_name:
+            print(f"  {DIM}Resolved {raw_name} -> {name}{RST}")
         found = run_search(name, servers)
         print_results(found, name)
 
-def cmd_track(query, servers):
+def cmd_track(query_raw, servers, exact_match=False):
+    query = resolve_steam_id(query_raw)
+    if query != query_raw:
+        print(f"  {DIM}Resolved {query_raw} -> {query}{RST}")
+
     interval = 60
-    print(f"\n  {Y}[TRACK] Tracking '{query}' — scanning every {interval}s. Ctrl+C to stop.{RST}\n")
+    mode_text = "EXACT" if exact_match else "PERMISSIVE"
+    print(f"\n  {Y}[TRACK] Tracking '{query}' ({mode_text}) — scanning every {interval}s. Ctrl+C to stop.{RST}\n")
     last_addr = None
     try:
         while True:
-            found = run_search(query, servers, silent=True)
+            found = run_search(query, servers, silent=True, exact_match=exact_match)
             now = datetime.now().strftime("%H:%M:%S")
             if found:
                 r = found[0]
@@ -354,8 +394,12 @@ def cmd_track(query, servers):
                 if addr != last_addr:
                     print(f"\n  {G}{B}[{now}] FOUND: {r['matched']}{RST}")
                     print(f"         {Y}connect {addr}{RST}  |  {r['map']}  |  {r['players']}")
-                    if copy_to_clipboard(f"connect {addr}"):
-                        print(f"         {DIM}✓ copied to clipboard{RST}")
+                    
+                    copy_choice = input(f"         {C}Do you want to copy the IP ({addr}) to the clipboard? (y/n) : {RST}").strip().lower()
+                    if copy_choice in ["y", "yes", "o", "oui"]:
+                        if copy_to_clipboard(addr):
+                            print(f"         {DIM}[OK] IP copied to clipboard{RST}")
+
                     last_addr = addr
                     add_history({
                         "query"   : query,
@@ -387,30 +431,58 @@ def cmd_history():
 def cmd_favs():
     favs = load_favorites()
     if not favs:
-        print(f"\n  {DIM}No favorites saved. Use 'addfav <name>' to add.{RST}\n")
+        print(f"\n  {DIM}No favorites saved. Use 'addfav <str>' or 'addfav <str> | <alias>' to add.{RST}\n")
         return
     print(f"\n  {B}Favorites:{RST}\n")
     for i, f in enumerate(favs, 1):
-        print(f"  {C}#{i}{RST}  {f}")
+        if isinstance(f, dict):
+            if f.get("alias"):
+                print(f"  {C}#{i}{RST}  {f['query']} {DIM}({f['alias']}){RST}")
+            else:
+                print(f"  {C}#{i}{RST}  {f['query']}")
+        else:
+            print(f"  {C}#{i}{RST}  {f}")
     print()
 
-def cmd_addfav(name):
+def cmd_addfav(arg):
     favs = load_favorites()
-    if name in favs:
-        print(f"  {DIM}'{name}' already in favorites.{RST}\n")
-        return
-    favs.append(name)
+    
+    if "|" in arg:
+        query, alias = [x.strip() for x in arg.split("|", 1)]
+    else:
+        query = arg.strip()
+        alias = ""
+        
+    for f in favs:
+        if isinstance(f, str) and f == query:
+            print(f"  {DIM}'{query}' already in favorites.{RST}\n")
+            return
+        elif isinstance(f, dict) and f.get("query") == query:
+            print(f"  {DIM}'{query}' already in favorites.{RST}\n")
+            return
+
+    favs.append({"query": query, "alias": alias})
     save_favorites(favs)
-    print(f"  {G}✓ '{name}' added to favorites.{RST}\n")
+    
+    if alias:
+        print(f"  {G}[OK] '{query}' ({alias}) added to favorites.{RST}\n")
+    else:
+        print(f"  {G}[OK] '{query}' added to favorites.{RST}\n")
 
 def cmd_delfav(name):
     favs = load_favorites()
-    if name not in favs:
-        print(f"  {R}'{name}' not in favorites.{RST}\n")
-        return
-    favs.remove(name)
-    save_favorites(favs)
-    print(f"  {Y}✓ '{name}' removed from favorites.{RST}\n")
+    for i, f in enumerate(favs):
+        if isinstance(f, str) and f == name:
+            favs.pop(i)
+            save_favorites(favs)
+            print(f"  {Y}[OK] '{name}' removed from favorites.{RST}\n")
+            return
+        elif isinstance(f, dict) and f.get("query") == name:
+            favs.pop(i)
+            save_favorites(favs)
+            print(f"  {Y}[OK] '{name}' removed from favorites.{RST}\n")
+            return
+    print(f"  {R}'{name}' not in favorites.{RST}\n")
 
 def cmd_scanfavs(servers):
     favs = load_favorites()
@@ -418,10 +490,23 @@ def cmd_scanfavs(servers):
         print(f"\n  {DIM}No favorites to scan.{RST}\n")
         return
     print(f"\n  {B}Scanning {len(favs)} favorite(s)...{RST}\n")
-    for name in favs:
-        found = run_search(name, servers)
-        print_results(found, name)
-
+    for f in favs:
+        if isinstance(f, dict):
+            name = f["query"]
+            alias_text = f" ({f['alias']})" if f.get("alias") else ""
+        else:
+            name = f
+            alias_text = ""
+            
+        resolved_name = resolve_steam_id(name)
+        if resolved_name != name:
+            print(f"  {DIM}Resolved {name} -> {resolved_name}{alias_text}{RST}")
+        else:
+            if alias_text:
+                print(f"  {DIM}Searching for {name}{alias_text}{RST}")
+                
+        found = run_search(resolved_name, servers)
+        print_results(found, resolved_name)
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -458,18 +543,32 @@ def main():
             cmd_multi(servers)
         elif cmd == "scanfavs":
             cmd_scanfavs(servers)
+        elif parts[0].lower() == "exact" and len(parts) == 2:
+            query = parts[1].strip()
+            resolved_query = resolve_steam_id(query)
+            if resolved_query != query:
+                print(f"  {DIM}Resolved {query} -> {resolved_query}{RST}")
+            found = run_search(resolved_query, servers, exact_match=True)
+            print_results(found, resolved_query)
         elif parts[0].lower() == "addfav" and len(parts) == 2:
             cmd_addfav(parts[1].strip())
         elif parts[0].lower() == "delfav" and len(parts) == 2:
             cmd_delfav(parts[1].strip())
         elif parts[0].lower() == "track" and len(parts) == 2:
-            cmd_track(parts[1].strip(), servers)
+            track_query = parts[1].strip()
+            exact = False
+            if track_query.lower().startswith("exact "):
+                track_query = track_query[6:].strip()
+                exact = True
+            cmd_track(track_query, servers, exact_match=exact)
         else:
-            # Normal search
-            found = run_search(raw, servers)
-            print_results(found, raw)
+            resolved_query = resolve_steam_id(raw)
+            if resolved_query != raw:
+                print(f"  {DIM}Resolved {raw} -> {resolved_query}{RST}")
+            found = run_search(resolved_query, servers, exact_match=False)
+            print_results(found, resolved_query)
 
-        print(f"  {DIM}{'─'*48}{RST}\n")
+        print(f"  {DIM}{'-'*48}{RST}\n")
 
 if __name__ == "__main__":
     main()
